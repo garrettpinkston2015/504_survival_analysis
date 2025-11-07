@@ -222,21 +222,6 @@ cox.zph(cox_age)
 
 ---
 ## Calendar Year Based Survival Analysis
-### Overall Survival for Birth Year $\geq$ 1950
-```{r}
-bhht_hist <- bhht_clean %>% filter(birth <= 1950)
-
-surv_obj_year <- Surv(time = bhht_hist$survival_time_year, event = bhht_hist$status)
-km_fit_year <- survfit(surv_obj_year ~ 1, data = bhht_hist)
-
-plot(km_fit_year,
-xlab = "Years since 1925",
-ylab = "Survival Probability",
-main = "Calendar-year Survival (born 1950 or later)",
-col = "black",
-lwd = 2)
-grid()
-```
 
 ### Death Counts by Year
 ```{r}
