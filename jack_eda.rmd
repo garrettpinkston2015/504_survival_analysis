@@ -1,18 +1,20 @@
 ---
 title: "STATS 504 R5 BHHT"
 author: "Enora Cattanach, Rachael Gu, Jack Nugent, and Garrett Pinkston"
-date: "`r Sys.Date()`"
+date: "2025-11-06"
 output:
   html_document:
     toc: true
     toc_float: true
     theme: readable
+    toc_depth: 3
+    toc_collapsed: true
+    toc_smooth_scroll: true
 ---
 
-```{r setup, include=FALSE}
-try(setwd("./FS25/STATS 504/Report Work/Report #5"), silent = TRUE)
+```{r}
+try(setwd("./FS25/STATS 504/504_survival_analysis"), silent = TRUE)
 
-install.packages("muhaz")
 library(muhaz)
 library(tidyverse)
 library(lubridate)
@@ -32,60 +34,94 @@ bhht %>% colnames %>% sort
 
 ### Filter to past 100 years
 ```{r}
-# Clean and filter BHHT data
-bhht_clean <- bhht %>%
+current_year <- 2025
+cutoff_year  <- 1925
 
-  # Keep only individuals with known birth year and
-  # restrict to individuals born or dying within past 100 years
-  filter(!is.na(birth)) %>%
-  filter(birth >= 1925 | death >= 1925) %>%
-  
-  mutate(
-    # If no death year, assume alive (censored)
-    death = if_else(is.na(death), year(Sys.Date()), death),
-    
-    # Survival time in years
-    survival_time = death - birth,
-    
-    # Define censoring: (1 = died, 0 = still alive)
-    event = if_else(!is.na(death) & death < year(Sys.Date()), 1, 0),
-    
-    # Clean factor variables
-    gender = factor(gender),
-    un_region = factor(un_region),
-    level1_main_occ = factor(level1_main_occ)
-  ) %>%
-  
-  # Keep reasonable lifespans only, under 110 years?
-  filter(survival_time > 0 & survival_time < 110)
+bhht_clean <- bhht %>%
+mutate(
+# Convert to integers
+birth = as.integer(birth),
+death = as.integer(death),
+death_min = as.integer(death_min),
+death_max = as.integer(death_max),
+updated_death_year = suppressWarnings(year(ymd(updated_death_date))),
+
+# Choose best death year
+death_best = coalesce(updated_death_year, death, death_min, death_max),
+
+# Impute censoring for plausible living people
+death_final = case_when(
+  !is.na(death_best) ~ death_best,
+  birth >= current_year - 110 ~ current_year,
+  TRUE ~ NA_integer_
+),
+
+status = if_else(!is.na(death_best), 1L, 0L),
+
+survival_time_age = death_final - birth,
+survival_time_year = death_final - cutoff_year
+
+) %>%
+filter(
+!is.na(death_final),
+!is.na(birth),
+survival_time_age > 0,
+death_final >= cutoff_year # alive in last 100 years
+)
+
 ```
 
+---
 ## EDA
 ```{r}
-summary(bhht_clean$survival_time)
+# Frequencies
 table(bhht_clean$gender)
 table(bhht_clean$un_region)
 table(bhht_clean$level1_main_occ)
+
+# Lifespan summaries
+summary(bhht_clean$survival_time_age)
+summary(bhht_clean$survival_time_year)
+
+# Proportion censored
+prop.table(table(bhht_clean$status))
 ```
 
+### Distribution by Gender
 ```{r}
 bhht_clean %>%
-ggplot(aes(x = survival_time, fill = gender)) +
-geom_histogram(bins = 40, position = "identity", alpha = 0.6) +
-labs(title = "Distribution of Lifespans by Gender",
-x = "Years Lived", y = "Count") +
-theme_minimal()
+  ggplot(aes(x = survival_time_age, fill = gender)) +
+  geom_histogram(bins = 40, position = "identity", alpha = 0.6) +
+  labs(title = "Distribution of Lifespans by Gender", x = "Age (Years)", y = "Count") +
+  theme_minimal()
+
+bhht_clean %>%
+  ggplot(aes(x = survival_time_year, fill = gender)) +
+  geom_histogram(bins = 40, position = "identity", alpha = 0.6) +
+  labs(title = "Distribution of Lifespans by Gender", x = "Years Since 1925", y = "Count") +
+  theme_minimal()
 ```
 
+### Distribution by UN Region
 ```{r}
-t <- bhht_clean %>% filter(gender == "Other") %>% head
-kable(t)
+bhht_clean %>%
+  ggplot(aes(x = survival_time_age, fill = un_region)) +
+  geom_histogram(bins = 40, position = "identity", alpha = 0.6) +
+  labs(title = "Distribution of Lifespans by UN Region", x = "Age (Years)", y = "Count") +
+  theme_minimal()
+
+bhht_clean %>%
+  ggplot(aes(x = survival_time_year, fill = un_region)) +
+  geom_histogram(bins = 40, position = "identity", alpha = 0.6) +
+  labs(title = "Distribution of Lifespans by UN Region", x = "Years Since 1925", y = "Count") +
+  theme_minimal()
 ```
 
-## Kaplan-Meier Estimation
+---
+## Age Based Survival Analysis
 ### Overall
 ```{r}
-surv_obj <- Surv(time = bhht_clean$survival_time, event = bhht_clean$event)
+surv_obj <- Surv(time = bhht_clean$survival_time_age, event = bhht_clean$status)
 
 km_fit <- survfit(surv_obj ~ 1, data = bhht_clean)
 
@@ -100,37 +136,45 @@ grid()
 
 ### By Gender
 ```{r}
-
+# Add toggle to remove "Other" from gender analysis
 bhht_clean_gdr <- bhht_clean %>% filter(gender != "Other")
-surv_obj_gdr <- Surv(time = bhht_clean_gdr$survival_time, event = bhht_clean_gdr$event)
-km_fit_gender <- survfit(surv_obj_gdr ~ gender, data = bhht_clean_gdr)
+
+surv_obj_age <- Surv(time = bhht_clean_gdr$survival_time_age, event = bhht_clean_gdr$status)
+km_fit_gender <- survfit(surv_obj_age ~ gender, data = bhht_clean_gdr)
 
 plot(km_fit_gender,
      xlab = "Age (Years)",
      ylab = "Survival Probability",
-     main = "Survival Curve by Gender",
-     col = c("blue", "red", "gray"),
+     main = "Survival by Gender",
+     col = c("red", "blue", "gray"),
      lwd = 2)
+legend("bottomleft", legend = levels(as.factor(bhht_clean_gdr$gender)),
+       col = c("red", "blue", "gray"), lwd = 2)
 grid()
-legend("topright", legend = levels(bhht_clean$gender), col = c("blue", "red", "gray"), lwd = 2)
+
+# Log-rank test
+survdiff(Surv(survival_time_age, status) ~ gender, data = bhht_clean_gdr)
 ```
 
+### By UN Region
 ```{r}
-library(RColorBrewer)
+surv_obj_age <- Surv(time = bhht_clean$survival_time_age, event = bhht_clean$status)
+km_fit_region <- survfit(surv_obj_age ~ un_region, data = bhht_clean)
 
-n_regions <- length(levels(bhht_clean$un_region))
-region_colors <- brewer.pal(max(3, n_regions), "Set1")[1:n_regions]
+region_colors <- rainbow(length(unique(bhht_clean$un_region)))
 
-km_fit_un_region <- survfit(surv_obj ~ un_region, data = bhht_clean)
-
-plot(km_fit_un_region,
+plot(km_fit_region,
      xlab = "Age (Years)",
      ylab = "Survival Probability",
-     main = "Survival Curve by UN Region",
+     main = "Survival by UN Region",
      col = region_colors,
      lwd = 2)
+legend("bottomleft", legend = levels(as.factor(bhht_clean$un_region)),
+       col = region_colors, lwd = 2, cex = 0.8)
 grid()
-legend("topright", legend = levels(bhht_clean$un_region), col = region_colors, lwd = 2)
+
+# Log-rank test
+survdiff(Surv(survival_time_age, status) ~ un_region, data = bhht_clean)
 ```
 
 ```{r}
@@ -139,19 +183,66 @@ surv_diff_region <- survdiff(surv_obj ~ gender, data = bhht_clean)
 surv_diff_region
 ```
 
-
-## Hazard Rate Estimation
+#### By Level 1 Occupation
 ```{r}
-hazard_est <- muhaz(bhht_clean$survival_time, bhht_clean$event)
+surv_obj_age <- Surv(time = bhht_clean$survival_time_age, event = bhht_clean$status)
+km_fit_occ <- survfit(surv_obj_age ~ level1_main_occ, data = bhht_clean)
 
-plot(hazard_est,
+occ_colors <- rainbow(length(unique(bhht_clean$level1_main_occ)))
+
+plot(km_fit_occ,
      xlab = "Age (Years)",
-     ylab = "Hazard Rate",
-     main = "Estimated Hazard Rate over Age",
-     col = "#000000",
+     ylab = "Survival Probability",
+     main = "Survival by Level 1 Occupation",
+     col = occ_colors,
      lwd = 2)
+legend("bottomleft", legend = levels(as.factor(bhht_clean$level1_main_occ)),
+       col = occ_colors, lwd = 2, cex = 0.7)
+grid()
+
+# Log-rank test
+survdiff(Surv(survival_time_age, status) ~ level1_main_occ, data = bhht_clean)
 ```
 
+---
 ## Cox Proportional Hazards Model
 ```{r}
+bhht_clean <- bhht_clean %>%
+mutate(
+gender = fct_lump_n(as.factor(gender), n = 2, other_level = "Other"),
+un_region = fct_lump_n(as.factor(un_region), n = 6, other_level = "Other"),
+level1_main_occ = fct_lump_n(as.factor(level1_main_occ), n = 8, other_level = "Other")
+)
+
+cox_age <- coxph(Surv(survival_time_age, status) ~ gender + un_region + level1_main_occ, data = bhht_clean)
+summary(cox_age)
+cox.zph(cox_age)
+```
+
+
+---
+## Calendar Year Based Survival Analysis
+### Overall Survival for Birth Year $\geq$ 1950
+```{r}
+bhht_hist <- bhht_clean %>% filter(birth <= 1950)
+
+surv_obj_year <- Surv(time = bhht_hist$survival_time_year, event = bhht_hist$status)
+km_fit_year <- survfit(surv_obj_year ~ 1, data = bhht_hist)
+
+plot(km_fit_year,
+xlab = "Years since 1925",
+ylab = "Survival Probability",
+main = "Calendar-year Survival (born 1950 or later)",
+col = "black",
+lwd = 2)
+grid()
+```
+
+### Death Counts by Year
+```{r}
+bhht_clean %>%
+filter(status == 1) %>%
+ggplot(aes(x = death_final)) +
+geom_histogram(binwidth = 5, fill="steelblue", color="white") +
+labs(title="Number of Deaths per Calendar Year", x="Year", y="Count")
 ```
